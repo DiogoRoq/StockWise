@@ -2,80 +2,103 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import tensorflow as tf
-
-
-data = pd.read_csv('data.csv')  
-data['Date'] = pd.to_datetime(data['Date']) 
-data.set_index('Date', inplace=True)
-target = data['SoldCount'].values
-scaler = MinMaxScaler(feature_range=(0, 1))
-scaled_data = scaler.fit_transform(target.reshape(-1, 1))
-
+from sklearn.metrics import mean_squared_error
 
 def create_sequences(data, time_step=1):
     X, y = [], []
     for i in range(len(data) - time_step):
-        X.append(data[i:(i + time_step), 0])
-        y.append(data[i + time_step, 0])
+        X.append(data[i:(i + time_step)])
+        y.append(data[i + time_step, -1])  # Target variable is the last column
     return np.array(X), np.array(y)
 
-time_step = 30
-X, y = create_sequences(scaled_data, time_step)
-
-
-X = X.reshape(X.shape[0], X.shape[1], 1)
-
-
-train_size = int(len(X) * 0.8)
-X_train, X_test = X[:train_size], X[train_size:]
-y_train, y_test = y[:train_size], y[train_size:]
-
-
-model = tf.keras.Sequential()
-model.add(tf.keras.LSTM(50, return_sequences=True, input_shape=(time_step, 1)))
-model.add(tf.keras.LSTM(50, return_sequences=False))
-model.add(tf.keras.Dense(25))
-model.add(tf.keras.Dense(1))
-
-
-model.compile(optimizer='adam', loss='mean_squared_error')
-
-
-model.fit(X_train, y_train, batch_size=32, epochs=20, validation_data=(X_test, y_test))
-
-
-predictions = model.predict(X_test)
-predictions = scaler.inverse_transform(predictions)  
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error
-
 def train_model(data):
-    data['month'] = pd.to_datetime(data['date']).dt.month
-    data['year'] = pd.to_datetime(data['date']).dt.year
-    data['day_of_week'] = pd.to_datetime(data['date']).dt.dayofweek
+    # Convert dates if there are any date columns
+    if 'ReleaseYear' in data.columns:
+        data['ReleaseYear'] = data['ReleaseYear'].astype(str)
+    
+    # Feature engineering
+    data['StrengthFactor'] = data['StrengthFactor'].astype(float)
+    data['PriceReg'] = data['PriceReg'].astype(float)
+    data['LowUserPrice'] = data['LowUserPrice'].astype(float)
+    data['LowNetPrice'] = data['LowNetPrice'].astype(float)
+    
+    features = ['StrengthFactor', 'PriceReg', 'LowUserPrice', 'LowNetPrice', 'ReleaseYear']
+    target = 'SoldCount'
 
-    features = ['month', 'year', 'day_of_week', 'other_features']
-    target = 'sales'
+    # Scaling the features
+    feature_scaler = MinMaxScaler(feature_range=(0, 1))
+    target_scaler = MinMaxScaler(feature_range=(0, 1))
+    
+    scaled_features = feature_scaler.fit_transform(data[features])
+    scaled_target = target_scaler.fit_transform(data[[target]])
 
+    # Combining scaled features and target
+    scaled_data = np.hstack((scaled_features, scaled_target))
 
-    X_train, X_test, y_train, y_test = train_test_split(data[features], data[target], test_size=0.2, random_state=42)
+    # Creating sequences for LSTM
+    time_step = 30
+    X, y = create_sequences(scaled_data, time_step)
+    X = X.reshape(X.shape[0], X.shape[1], len(features) + 1)
 
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    # Splitting the data into training and testing sets
+    train_size = int(len(X) * 0.8)
+    X_train, X_test = X[:train_size], X[train_size:]
+    y_train, y_test = y[:train_size], y[train_size:]
 
-    model.fit(X_train, y_train)
+    # Building the LSTM model
+    model = tf.keras.Sequential()
+    model.add(tf.keras.layers.LSTM(50, return_sequences=True, input_shape=(time_step, len(features) + 1)))
+    model.add(tf.keras.layers.LSTM(50, return_sequences=False))
+    model.add(tf.keras.layers.Dense(25))
+    model.add(tf.keras.layers.Dense(1))
 
-    y_pred = model.predict(X_test)
-    mse = mean_squared_error(y_test, y_pred)
+    model.compile(optimizer='adam', loss='mean_squared_error')
+
+    model.fit(X_train, y_train, batch_size=32, epochs=20, validation_data=(X_test, y_test))
+
+    # Making predictions
+    predictions = model.predict(X_test)
+    predictions = target_scaler.inverse_transform(predictions)
+
+    mse = mean_squared_error(target_scaler.inverse_transform(y_test.reshape(-1, 1)), predictions)
     print(f'Mean Squared Error: {mse}')
 
-    return model
+    return model, feature_scaler, target_scaler
 
-def predict_demand(model, stock_data):
-    stock_data['month'] = pd.to_datetime(stock_data['date']).dt.month
-    stock_data['year'] = pd.to_datetime(stock_data['date']).dt.year
-    stock_data['day_of_week'] = pd.to_datetime(stock_data['date']).dt.dayofweek
+def predict_demand(model, stock_data, feature_scaler, target_scaler):
+    # Convert dates if there are any date columns
+    if 'ReleaseYear' in stock_data.columns:
+        stock_data['ReleaseYear'] = stock_data['ReleaseYear'].astype(str)
+    
+    # Feature engineering
+    stock_data['StrengthFactor'] = stock_data['StrengthFactor'].astype(float)
+    stock_data['PriceReg'] = stock_data['PriceReg'].astype(float)
+    stock_data['LowUserPrice'] = stock_data['LowUserPrice'].astype(float)
+    stock_data['LowNetPrice'] = stock_data['LowNetPrice'].astype(float)
+    
+    features = ['StrengthFactor', 'PriceReg', 'LowUserPrice', 'LowNetPrice', 'ReleaseYear']
 
-    features = ['month', 'year', 'day_of_week', 'other_features']
-    stock_data['predicted_demand'] = model.predict(stock_data[features])
+    # Scaling the features
+    scaled_features = feature_scaler.transform(stock_data[features])
+
+    # Combining scaled features and initializing target as zeros for consistency
+    scaled_data = np.hstack((scaled_features, np.zeros((scaled_features.shape[0], 1))))
+
+    # Creating sequences for LSTM
+    time_step = 30
+    X, _ = create_sequences(scaled_data, time_step)
+    X = X.reshape(X.shape[0], X.shape[1], len(features) + 1)
+
+    # Making predictions
+    predictions = model.predict(X)
+    
+    # Inverse transform the predictions to get them back to the original scale
+    predictions = target_scaler.inverse_transform(predictions)
+
+    # Ensure the predictions are non-negative
+    predictions = np.maximum(predictions, 0)
+
+    # Adjust the length of stock_data to match the predictions
+    stock_data = stock_data.iloc[time_step:]
+    stock_data['predicted_demand'] = predictions
     return stock_data
