@@ -1,104 +1,116 @@
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
-import tensorflow as tf
-from sklearn.metrics import mean_squared_error
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import root_mean_squared_error
+from sklearn.preprocessing import StandardScaler
 
-def create_sequences(data, time_step=1):
-    X, y = [], []
-    for i in range(len(data) - time_step):
-        X.append(data[i:(i + time_step)])
-        y.append(data[i + time_step, -1])  # Target variable is the last column
-    return np.array(X), np.array(y)
+def preprocess_data(df):
+    """
+    Preprocess the input data for training or prediction.
+    """
+    # Make a copy of the input data to avoid modifying the original
+    df = df.copy()
 
-def train_model(data):
-    # Convert dates if there are any date columns
-    if 'ReleaseYear' in data.columns:
-        data['ReleaseYear'] = data['ReleaseYear'].astype(str)
-    
-    # Feature engineering
-    data['StrengthFactor'] = data['StrengthFactor'].astype(float)
-    data['PriceReg'] = data['PriceReg'].astype(float)
-    data['LowUserPrice'] = data['LowUserPrice'].astype(float)
-    data['LowNetPrice'] = data['LowNetPrice'].astype(float)
-    
-    features = ['StrengthFactor', 'PriceReg', 'LowUserPrice', 'LowNetPrice', 'ReleaseYear']
-    target = 'SoldCount'
+    # Drop the 'record_ID' column (irrelevant for training/prediction)
+    if 'record_ID' in df.columns:
+        df.drop('record_ID', axis=1, inplace=True)
 
-    # Scaling the features
-    feature_scaler = MinMaxScaler(feature_range=(0, 1))
-    target_scaler = MinMaxScaler(feature_range=(0, 1))
-    
-    scaled_features = feature_scaler.fit_transform(data[features])
-    scaled_target = target_scaler.fit_transform(data[[target]])
+    # Split 'week' column into 'day', 'month', 'year'
+    if 'week' in df.columns:
+        df[['day', 'month', 'year']] = df['week'].str.split('/', expand=True)
+        df.drop('week', axis=1, inplace=True)  # Drop the original 'week' column
 
-    # Combining scaled features and target
-    scaled_data = np.hstack((scaled_features, scaled_target))
+    # One-hot encode categorical variables
+    df = pd.get_dummies(df, columns=['store_id', 'sku_id'], drop_first=True)
 
-    # Creating sequences for LSTM
-    time_step = 30
-    X, y = create_sequences(scaled_data, time_step)
-    X = X.reshape(X.shape[0], X.shape[1], len(features) + 1)
+    return df
 
-    # Splitting the data into training and testing sets
-    train_size = int(len(X) * 0.8)
-    X_train, X_test = X[:train_size], X[train_size:]
-    y_train, y_test = y[:train_size], y[train_size:]
+def train_model(df):
+    # Preprocess the data
+    df = preprocess_data(df)
+    print("Columns after preprocessing (training):", df.columns.tolist())
 
-    # Building the LSTM model
-    model = tf.keras.Sequential()
-    model.add(tf.keras.layers.LSTM(50, return_sequences=True, input_shape=(time_step, len(features) + 1)))
-    model.add(tf.keras.layers.LSTM(50, return_sequences=False))
-    model.add(tf.keras.layers.Dense(25))
-    model.add(tf.keras.layers.Dense(1))
+    # Remove outliers (keeping values below the 99th percentile)
+    df = df[df.units_sold < df.units_sold.quantile(0.99)]
 
-    model.compile(optimizer='adam', loss='mean_squared_error')
+    # Splitting data into features (X) and target variable (y)
+    X = df.drop('units_sold', axis=1)  # Features (all columns except 'units_sold')
+    y = df['units_sold']  # Target variable
 
-    model.fit(X_train, y_train, batch_size=32, epochs=20, validation_data=(X_test, y_test))
+    # Feature scaling
+    feature_scaler = StandardScaler()
+    X_scaled = feature_scaler.fit_transform(X)
 
-    # Making predictions
-    predictions = model.predict(X_test)
-    predictions = target_scaler.inverse_transform(predictions)
+    # Target scaling (if needed)
+    target_scaler = StandardScaler()
+    y_scaled = target_scaler.fit_transform(y.values.reshape(-1, 1)).flatten()
 
-    mse = mean_squared_error(target_scaler.inverse_transform(y_test.reshape(-1, 1)), predictions)
-    print(f'Mean Squared Error: {mse}')
+    # Creating train-test split
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_scaled, test_size=0.2, random_state=42)
 
-    return model, feature_scaler, target_scaler
+    # Defining parameters for model optimization
+    param_grid = {
+        'n_estimators': [10, 20],
+        'min_samples_split': [2, 3]
+    }
 
-def predict_demand(model, stock_data, feature_scaler, target_scaler):
-    # Convert dates if there are any date columns
-    if 'ReleaseYear' in stock_data.columns:
-        stock_data['ReleaseYear'] = stock_data['ReleaseYear'].astype(str)
-    
-    # Feature engineering
-    stock_data['StrengthFactor'] = stock_data['StrengthFactor'].astype(float)
-    stock_data['PriceReg'] = stock_data['PriceReg'].astype(float)
-    stock_data['LowUserPrice'] = stock_data['LowUserPrice'].astype(float)
-    stock_data['LowNetPrice'] = stock_data['LowNetPrice'].astype(float)
-    
-    features = ['StrengthFactor', 'PriceReg', 'LowUserPrice', 'LowNetPrice', 'ReleaseYear']
+    # Creating and training the RandomForestRegressor model
+    model = RandomForestRegressor(n_jobs=-1)
+    grid_search = GridSearchCV(model, param_grid, verbose=2, cv=3)
+    grid_search.fit(X_train, y_train)
 
-    # Scaling the features
-    scaled_features = feature_scaler.transform(stock_data[features])
+    # Making predictions and calculating error
+    y_pred = grid_search.best_estimator_.predict(X_test)
+    rmse = root_mean_squared_error(y_test, y_pred)
 
-    # Combining scaled features and initializing target as zeros for consistency
-    scaled_data = np.hstack((scaled_features, np.zeros((scaled_features.shape[0], 1))))
+    # Save the feature names AFTER preprocessing
+    feature_names = X.columns.tolist()
 
-    # Creating sequences for LSTM
-    time_step = 30
-    X, _ = create_sequences(scaled_data, time_step)
-    X = X.reshape(X.shape[0], X.shape[1], len(features) + 1)
+    # Return the model, scalers, feature names, and RMSE
+    return grid_search.best_estimator_, feature_scaler, target_scaler, feature_names, rmse
 
-    # Making predictions
-    predictions = model.predict(X)
-    
-    # Inverse transform the predictions to get them back to the original scale
-    predictions = target_scaler.inverse_transform(predictions)
 
-    # Ensure the predictions are non-negative
-    predictions = np.maximum(predictions, 0)
+def predict_demand(model, stock_data, feature_scaler, target_scaler, feature_columns):
 
-    # Adjust the length of stock_data to match the predictions
-    stock_data = stock_data.iloc[time_step:]
-    stock_data['predicted_demand'] = predictions
-    return stock_data
+    # Preprocess the input data (same as during training)
+    stock_data = preprocess_data(stock_data)
+
+    # Ensure the input data has the same columns as the training data
+    # Add missing columns (if any) and remove extra columns
+    for col in feature_columns:
+        if col not in stock_data.columns:
+            stock_data[col] = 0  # Add missing columns with default value 0
+
+    # Reorder columns to match the training data
+    stock_data = stock_data[feature_columns]
+
+    # Scale the features using the same scaler from training
+    stock_data_scaled = feature_scaler.transform(stock_data)
+
+    # Make predictions
+    predictions = model.predict(stock_data_scaled)
+
+    # Inverse transform the predictions if target scaling was used
+    if target_scaler:
+        predictions = target_scaler.inverse_transform(predictions.reshape(-1, 1))
+
+    # Round the predictions to the nearest integer
+    predictions = predictions.round().astype(int)
+
+    # Add the predictions to the original data
+    stock_data['Predicted Demand'] = predictions
+
+    # Extract the sku_id from the one-hot encoded columns
+    sku_id_columns = [col for col in stock_data.columns if col.startswith('sku_id_')]
+    sku_ids = [col.replace('sku_id_', '') for col in sku_id_columns]
+
+    # Create a DataFrame with sku_id and predicted demand
+    results = []
+    for sku_id in sku_ids:
+        sku_col = f'sku_id_{sku_id}'
+        if sku_col in stock_data.columns:
+            demand = stock_data.loc[stock_data[sku_col] == 1, 'Predicted Demand'].values
+            if len(demand) > 0:
+                results.append({'sku_id': sku_id, 'Predicted Demand': demand[0]})
+
+    return pd.DataFrame(results)

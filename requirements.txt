@@ -1,5 +1,7 @@
-Flask
+fastapi
+uvicorn
 pandas
 scikit-learn
 joblib
-tensorflow
+matplotlib
+python-multipart
